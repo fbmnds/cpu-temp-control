@@ -8,7 +8,10 @@ exception Break;;
 
 
 
-(* Utilities *)  
+(*
+   Utilities
+   -----------------------------------------------------------------------------------------------------------------
+ *)  
 
   
 let read_file converter filename =
@@ -56,7 +59,11 @@ let choose_from_ascending array value =
 
 
   
-(* CPU interfaces for Debian/Ubuntu, verified on Pine64 on DietPi *)
+(*
+   CPU interfaces for Debian/Ubuntu, verified on Pine64 on DietPi
+   -----------------------------------------------------------------------------------------------------------------
+*)  
+
 
   
 (*
@@ -124,17 +131,22 @@ let write_cpus_govenor cpus gov =
 ;;
   
 
-(* Pine64 specific PID settings *)
+(*
+   Pine64 specific PID settings
+   -----------------------------------------------------------------------------------------------------------------
+ *)  
 
-  
 
 let cpus = [| 0; 1; 2; 3; |] ;;   
 
 let available_freqs_kHz = read_cpu_available_freqs_kHz 0 ;;
 let desired_freqs_range_kHz = [| available_freqs_kHz.(5); available_freqs_kHz.(9); available_freqs_kHz.(11) |] ;;
 
+let get_valid_freq freq = freq |> choose_from_ascending available_freqs_kHz ;;  
+(*
 choose_from_ascending available_freqs_kHz (available_freqs_kHz.(5) -. 7.)
 |> print_float;;
+ *)
   
 let desired_temp_C = [| 35.; 45.; 60.; |] ;;  
 
@@ -142,19 +154,19 @@ let ratio_freq_temp = desired_freqs_range_kHz.(1) /. desired_temp_C.(1) ;;
   
 type state =  {
     _P : float ; _I : float ; _D : float ;
-    time_sec : float ; dt_sec : float;
-    last_err : float ; cum_err : float ; 
-    corr : float; ratio_x_y : float ;
-    x : float ; y : float
+    t_sec : float ; dt_sec : float;
+    last_err_kHz : float ; cum_err_kHz : float ; 
+    pid_freq_kHz : float; ratio_freq_temp : float ;
+    ctrl_freq_kHz : float ; temp_C : float
   }             
 
                  
 let state_0 = {
     _P = 0.; _I = 0.; _D = 0.;
-    time_sec = (time()); dt_sec = 0.;
-    last_err = 0.; cum_err = 0.; 
-    corr = 0.; ratio_x_y = ratio_freq_temp; 
-    x = desired_freqs_range_kHz.(1); y = desired_temp_C.(1); }
+    t_sec = (time()); dt_sec = 0.;
+    last_err_kHz = 0.; cum_err_kHz = 0.; 
+    pid_freq_kHz = 0.; ratio_freq_temp = ratio_freq_temp; 
+    ctrl_freq_kHz = desired_freqs_range_kHz.(1); temp_C = desired_temp_C.(1); }
 ;;
 
 
@@ -174,57 +186,105 @@ let dampen corr =
 ;;
 
   
-(* PID control *)
+(*
+   PID control
+   -----------------------------------------------------------------------------------------------------------------
+ *)  
+
                             
-  
-let correction state (x: float) (y: float) =
-  (* let corr = ref 0. in *)
+(*  
+let correction state =
+  (* measure *)
+  let curr_freq_kHz = read_cpu_scaling_max_freq_kHz 0 in
+  let curr_temp_C = read_cpu_temp_celsius () in
+  let error_kHz = (curr_temp_C -. desired_temp_C.(0)) *. ratio_freq_temp in
   
   let t_sec = (time ()) in
-  let dt_sec = t_sec -. state.time_sec in
-  let error = (state.y -. y) *. state.ratio_x_y in
+  let dt_sec = t_sec -. state.t_sec in
                       
   (* P correction *)
-  let _P = state._P *. error *. dt_sec in
+  let _P = state._P *. error_kHz *. dt_sec in
 
   (* I Correction *)
-  let _I = state._I *. state.cum_err *. dt_sec in
+  let _I = state._I *. state.cum_err_kHz *. dt_sec in
 
   (* D Correction *)
-  let slope = (error -. state.last_err) /. dt_sec in
+  let slope = (error_kHz -. state.last_err_kHz) /. dt_sec in
   let _D = state._D *. slope in
 
 
-  (*let last_err = error in*)
-  let cum_err = state.cum_err +. error in
-  
-  (* dampening the correction value *)
-  let corr = dampen (_P +. _I +. _D) in
+  (* apply correction *)
+  let cum_err_kHz = state.cum_err_kHz +. error_kHz in
+  let pid_freq_kHz = get_valid_freq (curr_freq_kHz +. error_kHz) in
+  let ctrl_freq_kHz =
+    (* enforced freq reduction while overheating *)
+    if curr_temp_C >= desired_temp_C.(2) then (min pid_freq_kHz (get_valid_freq (curr_freq_kHz -. 1.)))
+    else (
+      (* enforced freq increase on low temperature *)
+      if curr_temp_C < desired_temp_C.(0) then (max (get_valid_freq (curr_freq_kHz +. 1.)) pid_freq_kHz)
+      else pid_freq_kHz
+    ) in
+  write_cpus_govenor cpus "ondemand";
+  write_cpus_scaling_max_freq_kHz cpus ctrl_freq_kHz;
   {
     _P = _P; _I = _I; _D = _D;
-    time_sec = t_sec; dt_sec = dt_sec;
-    last_err = error; cum_err = cum_err; 
-    corr = corr; ratio_x_y = state.ratio_x_y; 
-    x = x +. corr; y = y;
+    t_sec = t_sec; dt_sec = dt_sec;
+    last_err_kHz = error_kHz; cum_err_kHz = cum_err_kHz; 
+    pid_freq_kHz = pid_freq_kHz; ratio_freq_temp = ratio_freq_temp; 
+    ctrl_freq_kHz = ctrl_freq_kHz; temp_C = curr_temp_C;
   }
 ;;
 
 
-let measure_x () = read_cpu_scaling_max_freq_kHz 0 ;;
-
-let measure_y () = read_cpu_temp_celsius () ;;
-
 let apply (state: state) : state =
   write_cpus_govenor cpus "ondemand";
-  write_cpus_scaling_max_freq_kHz cpus state.x;
+  write_cpus_scaling_max_freq_kHz cpus state.ctrl_freq_kHz;
   state
 ;;
-                     
+ *)
+                  
 let control_cpu_temp state =
   try
-    (sprintf "governor = %s; temperature = %f C; freq_max = %f kHz" (read_cpu_governor 0) state.y state.x) |> print_endline;
-    correction state (measure_x ()) (measure_y ())
-    |> apply;
+    (sprintf "governor = %s; temperature = %f C; freq_max = %f kHz" (read_cpu_governor 0) state.temp_C state.ctrl_freq_kHz) |> print_endline;
+    (* measure *)
+    let curr_freq_kHz = read_cpu_scaling_max_freq_kHz 0 in
+    let curr_temp_C = read_cpu_temp_celsius () in
+    let error_kHz = (curr_temp_C -. desired_temp_C.(0)) *. ratio_freq_temp in
+    
+    let t_sec = (time ()) in
+    let dt_sec = t_sec -. state.t_sec in
+    
+    (* P correction *)
+    let _P = state._P *. error_kHz *. dt_sec in
+
+    (* I Correction *)
+    let _I = state._I *. state.cum_err_kHz *. dt_sec in
+
+    (* D Correction *)
+    let slope = (error_kHz -. state.last_err_kHz) /. dt_sec in
+    let _D = state._D *. slope in
+
+
+    (* apply correction *)
+    let cum_err_kHz = state.cum_err_kHz +. error_kHz in
+    let pid_freq_kHz = get_valid_freq (curr_freq_kHz +. error_kHz) in
+    let ctrl_freq_kHz =
+      (* enforced freq reduction while overheating *)
+      if curr_temp_C >= desired_temp_C.(2) then (min pid_freq_kHz (get_valid_freq (curr_freq_kHz -. 1.)))
+      else (
+        (* enforced freq increase on low temperature *)
+        if curr_temp_C < desired_temp_C.(0) then (max (get_valid_freq (curr_freq_kHz +. 1.)) pid_freq_kHz)
+        else pid_freq_kHz
+      ) in
+    write_cpus_govenor cpus "ondemand";
+    write_cpus_scaling_max_freq_kHz cpus ctrl_freq_kHz;
+    {
+      _P = _P; _I = _I; _D = _D;
+      t_sec = t_sec; dt_sec = dt_sec;
+      last_err_kHz = error_kHz; cum_err_kHz = cum_err_kHz; 
+      pid_freq_kHz = pid_freq_kHz; ratio_freq_temp = ratio_freq_temp; 
+      ctrl_freq_kHz = ctrl_freq_kHz; temp_C = curr_temp_C;
+    }
   with _ -> state    
 ;;
   
